@@ -1,6 +1,6 @@
 # RAG Support Knowledge Agent
 
-Upgrades an existing production email-support automation from hardcoded prompt rules to a real retrieval-augmented pipeline: answers are generated from a versioned knowledge base via vector search, cited by source, with automatic escalation when the knowledge base doesn't cover the question.
+Upgrades an existing production email-support automation — [`hush-email-automation`](https://github.com/vitaliiburorichnyi/hush-email-automation) — from hardcoded prompt rules to a real retrieval-augmented pipeline: answers are generated from a versioned knowledge base via vector search, cited by source, with automatic escalation when the knowledge base doesn't cover the question.
 
 **The one-sentence pitch:** *My email support agent used to answer from hardcoded prompt rules. I rebuilt it to answer from a versioned knowledge base via vector search — grounded, cited, and evaluated on a 30-question golden set.*
 
@@ -68,7 +68,7 @@ rag-support-agent/
 
 **Day 2 — Ingestion.** A Drive-triggered n8n workflow watches the KB folder. On any new or edited file: download → extract text → chunk (markdown-heading-aware, 2000 chars, 15% overlap) → embed → delete that doc's old chunks → insert the new ones. Editing a doc and re-saving it fully refreshes the vector store with no manual steps.
 
-**Day 3 — Retrieval, wired into a real production workflow.** Not a standalone demo — this slots into an existing Gmail-based P1-P4 support triage system. Incoming email → embed the question → top-5 similarity search → Claude answers *only* from the retrieved chunks, citing the source doc → if any part of the question isn't covered, the whole reply is escalated instead of a mixed partial answer.
+**Day 3 — Retrieval, wired into a real production workflow.** Not a standalone demo — this slots into an existing Gmail-based P1-P4 support triage system ([`hush-email-automation`](https://github.com/vitaliiburorichnyi/hush-email-automation)), replacing its prompt-rule answer step. Incoming email → embed the question → top-5 similarity search → Claude answers *only* from the retrieved chunks, citing the source doc → if any part of the question isn't covered, the whole reply is escalated instead of a mixed partial answer.
 
 **Day 4 — Guardrails + observability.** A 0.65 cosine-distance threshold (validated empirically, see below) forces escalation on low-confidence retrievals. Every request — question, retrieved chunk titles/scores, final answer, escalation reason — logs to `retrieval_logs` *before* any Gmail action runs, so a Gmail-side failure can never erase the audit trail.
 
