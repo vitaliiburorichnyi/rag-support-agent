@@ -1,0 +1,11 @@
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+.env
+.env.*
+*.local
+
+node_modules/

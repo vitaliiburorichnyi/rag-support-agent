@@ -1,0 +1,165 @@
+{
+  "name": "Day 3-4 - Email Support Automation with RAG Retrieval",
+  "_note": "This is the RAG-relevant slice of the production 'Hush Email Support Automation' workflow, exported for the portfolio case. Business-specific IDs (spreadsheet ID, Telegram chat ID, Gmail label IDs) have been replaced with placeholders. The pre-existing P1-P4 classification/routing logic (built before this RAG project) is included for context on how retrieval slots into a real production workflow.",
+  "nodes": [
+    {
+      "parameters": { "pollTimes": { "item": [{ "mode": "everyMinute" }] }, "simple": false, "filters": { "readStatus": "unread" }, "options": {} },
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 608]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 1 },
+          "conditions": [
+            { "leftValue": "={{ $json.from.text }}", "rightValue": "noreply", "operator": { "type": "string", "operation": "notContains" } },
+            { "leftValue": "={{ $json.from.text }}", "rightValue": "no-reply", "operator": { "type": "string", "operation": "notContains" } },
+            { "leftValue": "={{ $json.from.text }}", "rightValue": "mailer-daemon", "operator": { "type": "string", "operation": "notContains" } },
+            { "leftValue": "={{$json.subject}}", "rightValue": "automated notification", "operator": { "type": "string", "operation": "notContains" } },
+            { "leftValue": "={{ $json.text }}", "rightValue": "unsubscribe", "operator": { "type": "string", "operation": "notContains" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Filter: Real Customers",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-976, 608]
+    },
+    {
+      "parameters": {
+        "modelId": { "__rl": true, "value": "gpt-4o-mini", "mode": "list" },
+        "messages": { "values": [
+          { "role": "system", "content": "You are a support classifier for a premium bag e-commerce store. Classify priority (P1-P4), category, sentiment, and whether a human is required. [Full production prompt omitted for brevity in this case-study export - see README for the classification schema.]" },
+          { "content": "=Subject: {{ $json.subject }}\nFrom: {{ $json.from.text }}\nEmail body:\n{{ $json.text }}" }
+        ] },
+        "jsonOutput": true,
+        "options": { "temperature": 0.2 }
+      },
+      "name": "AI Classifier (OpenAI)",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.3,
+      "position": [-752, 512],
+      "notes": "Pre-existing P1-P4 classifier from the base email automation case. Unchanged by the RAG project."
+    },
+    {
+      "parameters": { "jsCode": "// Parses the classifier's JSON output and enriches it with email metadata (id, thread id, sender, subject) pulled from the Gmail Trigger node. Falls back to a safe default + parse_error flag if the model returns malformed JSON. See README for full logic." },
+      "name": "Parser & Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 512]
+    },
+    {
+      "parameters": { "options": {} },
+      "name": "Embeddings OpenAI (Retrieval)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [-96, 736],
+      "credentials": { "openAiApi": { "name": "OpenAi account" } },
+      "notes": "DAY 3 ADDITION: embeds the incoming customer email as a single query vector."
+    },
+    {
+      "parameters": {
+        "mode": "load",
+        "tableName": "documents",
+        "prompt": "={{ $(\"Gmail Trigger\").item.json.text }}",
+        "topK": 5,
+        "includeDocumentMetadata": true,
+        "options": { "columnNames": { "values": { "idColumnName": "id", "vectorColumnName": "embedding", "contentColumnName": "content", "metadataColumnName": "metadata" } } }
+      },
+      "name": "Retrieve KB Chunks",
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePGVector",
+      "typeVersion": 1.3,
+      "position": [-176, 512],
+      "credentials": { "postgres": { "name": "Postgres account" } },
+      "notes": "DAY 3 ADDITION: top-5 cosine-distance similarity search against the ingested KB. mode='load' just retrieves - no writes."
+    },
+    {
+      "parameters": { "jsCode": "const items = $input.all();\nconst parserData = $('Parser & Enrichment').first().json;\nconst customerMessage = $('Gmail Trigger').first().json.text || '';\n\nconst scored = items.map((item) => ({\n  title: item.json.document?.metadata?.title || 'unknown',\n  sourceUrl: item.json.document?.metadata?.source_url || '',\n  content: item.json.document?.pageContent || '',\n  score: item.json.score\n}));\n\nconst bestScore = scored.length ? Math.min(...scored.map((s) => s.score)) : 999;\n// score is cosine DISTANCE (lower = more similar), not similarity.\n// 0.65 threshold empirically validated against the 30-question golden eval set (Day 4/5).\nconst lowConfidence = bestScore > 0.65;\n\nconst contextBlock = scored\n  .map((s, idx) => `[Source ${idx + 1}: ${s.title}]\\n${s.content}`)\n  .join('\\n\\n---\\n\\n');\n\nreturn [{\n  json: {\n    ...parserData,\n    customer_message: customerMessage,\n    retrieval_context: contextBlock,\n    retrieval_citations: scored.map((s) => ({ title: s.title, url: s.sourceUrl, score: s.score })),\n    retrieval_best_score: bestScore,\n    retrieval_low_confidence: lowConfidence\n  }\n}];" },
+      "name": "Build Context & Check Confidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [176, 512],
+      "notes": "DAY 3/4: shapes retrieved chunks into a citation-ready context block, computes the confidence signal used for auto-escalation."
+    },
+    {
+      "parameters": { "model": { "__rl": true, "mode": "list", "value": "claude-sonnet-4-6", "cachedResultName": "Claude Sonnet 4.6" }, "options": { "temperature": 0.2 } },
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.5,
+      "position": [480, 736],
+      "credentials": { "anthropicApi": { "name": "Anthropic account" } }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.customer_message }}",
+        "messages": { "messageValues": [
+          { "type": "SystemMessagePromptTemplate", "message": "=You are the support reply writer for [Store], a premium bag e-commerce store. Answer the customer's question using ONLY the information in the context below. Reference which source you used by name in your answer. Tone: warm, direct, no corporate filler - state the policy plainly, then the action being taken.\n\nDo not infer that something is unavailable, unsupported, or against policy just because it is absent from a list in the context (for example, a list of accepted payment methods, or a list of covered materials). Only state a policy as true or false if the context explicitly says so. If the customer asks about something not explicitly addressed in the context, treat it as not covered by the knowledge base and escalate rather than guessing from an adjacent list.\n\nThe customer's message may contain multiple questions. If EVERY part can be answered from the context, give one complete grounded answer covering all parts. If ANY part cannot be answered confidently from the context, do NOT give a partial answer or mix formats - treat the entire reply as needing escalation instead. In that case respond with EXACTLY this and nothing else: NEEDS_ESCALATION: <one sentence reason>\n\nContext:\n{{ $json.retrieval_context }}" }
+        ] }
+      },
+      "name": "Generate Grounded Answer",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [400, 512],
+      "notes": "DAY 3 core prompt. Tightened in Day 5 after eval found the model inferring negatives from exhaustive lists instead of escalating (e.g. 'not in the payment list = not accepted')."
+    },
+    {
+      "parameters": { "jsCode": "const contextData = $('Build Context & Check Confidence').first().json;\nconst llmOutput = $input.first().json;\nconst answerText = (llmOutput.text ?? llmOutput.response ?? llmOutput.output ?? '').toString().trim();\n\n// Non-anchored match: the model can append the marker after a partial\n// answer instead of replacing the whole reply - catch it anywhere.\nconst escalationMatch = answerText.match(/NEEDS_ESCALATION:\\s*(.*)/is);\nconst modelSaysEscalate = !!escalationMatch;\nconst forceEscalate = contextData.retrieval_low_confidence || modelSaysEscalate;\n\nreturn [{\n  json: {\n    ...contextData,\n    suggested_response: modelSaysEscalate\n      ? \"I want to make sure you get an accurate answer here, so I'm passing this to our team for a closer look - you'll hear from us shortly.\"\n      : answerText,\n    requires_human: forceEscalate ? true : contextData.requires_human,\n    escalation_reason: modelSaysEscalate ? escalationMatch[1] : (contextData.retrieval_low_confidence ? ('Low retrieval confidence (best_score=' + contextData.retrieval_best_score + ')') : null)\n  }\n}];" },
+      "name": "Apply Grounding to Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [752, 512],
+      "notes": "Parses the escalation marker, applies the confidence-threshold guardrail, produces the final routable payload."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into retrieval_logs (email_id, email_subject, customer_message, retrieved_chunks, best_score, low_confidence, requires_human, escalation_reason, final_response)\nvalues ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9);",
+        "options": { "queryReplacement": "={{ [$json.email_id, $json.email_subject, $json.customer_message, JSON.stringify($json.retrieval_citations), $json.retrieval_best_score, $json.retrieval_low_confidence, $json.requires_human, $json.escalation_reason, $json.suggested_response] }}" }
+      },
+      "name": "Log Retrieval Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [976, 512],
+      "credentials": { "postgres": { "name": "Postgres account" } },
+      "notes": "DAY 4 observability. Runs BEFORE the Gmail action fan-out (Switch Router / Sheets log) so a Gmail-side failure can never wipe out the audit trail. Uses a single-expression array for queryReplacement, not a comma-joined template string - free text containing commas will silently corrupt parameter alignment otherwise (real bug found and fixed during this build)."
+    },
+    {
+      "parameters": { "rules": { "values": [
+        { "conditions": { "conditions": [{ "leftValue": "={{ $json.priority }}", "rightValue": "P1", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "P1 - Legal/Fraud Alert" },
+        { "conditions": { "conditions": [{ "leftValue": "={{ $json.priority }}", "rightValue": "P2", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "P2 - Escalate Draft" },
+        { "conditions": { "conditions": [{ "leftValue": "={{ $json.priority }}", "rightValue": "P3", "operator": { "type": "string", "operation": "equals" } }, { "leftValue": "={{ $json.requires_human }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "P3 - Auto Respond" },
+        { "conditions": { "conditions": [{ "leftValue": "={{ $json.priority }}", "rightValue": "P4", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": true, "outputKey": "P4 - Tag Only" }
+      ] }, "options": { "fallbackOutput": "extra", "renameFallbackOutput": "Default - Needs Human" } },
+      "name": "Switch Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1200, 320],
+      "notes": "Pre-existing routing from the base case. requires_human=true (from either the classifier OR the RAG confidence guardrail) always falls to a human-review branch, never auto-sends."
+    },
+    {
+      "parameters": { "operation": "append", "documentId": { "__rl": true, "value": "<YOUR_GOOGLE_SHEET_ID>", "mode": "id" }, "sheetName": { "__rl": true, "value": "Sheet1", "mode": "name" }, "columns": { "mappingMode": "defineBelow", "value": { "Timestamp": "={{ $json.received_at }}", "Email ID": "={{ $json.email_id }}", "From": "={{ $json.email_from }}", "Priority": "={{ $json.priority }}", "Requires Human": "={{ $json.requires_human }}", "AI Response": "={{ $json.suggested_response }}" } } },
+      "name": "Google Sheets: Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [1200, 608]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [[{ "node": "Filter: Real Customers", "type": "main", "index": 0 }]] },
+    "Filter: Real Customers": { "main": [[{ "node": "AI Classifier (OpenAI)", "type": "main", "index": 0 }]] },
+    "AI Classifier (OpenAI)": { "main": [[{ "node": "Parser & Enrichment", "type": "main", "index": 0 }]] },
+    "Parser & Enrichment": { "main": [[{ "node": "Retrieve KB Chunks", "type": "main", "index": 0 }]] },
+    "Embeddings OpenAI (Retrieval)": { "ai_embedding": [[{ "node": "Retrieve KB Chunks", "type": "ai_embedding", "index": 0 }]] },
+    "Retrieve KB Chunks": { "main": [[{ "node": "Build Context & Check Confidence", "type": "main", "index": 0 }]] },
+    "Anthropic Chat Model": { "ai_languageModel": [[{ "node": "Generate Grounded Answer", "type": "ai_languageModel", "index": 0 }]] },
+    "Build Context & Check Confidence": { "main": [[{ "node": "Generate Grounded Answer", "type": "main", "index": 0 }]] },
+    "Generate Grounded Answer": { "main": [[{ "node": "Apply Grounding to Response", "type": "main", "index": 0 }]] },
+    "Apply Grounding to Response": { "main": [[{ "node": "Log Retrieval Query", "type": "main", "index": 0 }]] },
+    "Log Retrieval Query": { "main": [[{ "node": "Switch Router", "type": "main", "index": 0 }, { "node": "Google Sheets: Log", "type": "main", "index": 0 }]] }
+  }
+}
